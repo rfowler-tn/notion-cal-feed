@@ -1,54 +1,97 @@
 import { Client } from '@notionhq/client';
 import { createEvents } from 'ics';
 
-// Initialize Notion client with your API key
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const databaseId = process.env.NOTION_DATABASE_ID;
 
+// Helper to extract exact times from Notion's date format
+function parseDate(dateStr) {
+  if (!dateStr) return null;
+  const dateObj = new Date(dateStr);
+  
+  // If the Notion string contains a 'T', it has a specific time attached
+  if (dateStr.includes('T')) {
+    return [
+      dateObj.getFullYear(),
+      dateObj.getMonth() + 1, // ICS months are calculated 1-12
+      dateObj.getDate(),
+      dateObj.getHours(),
+      dateObj.getMinutes()
+    ];
+  }
+  // Otherwise, it treats it as an all-day event
+  return [
+    parseInt(dateStr.substring(0, 4)),
+    parseInt(dateStr.substring(5, 7)),
+    parseInt(dateStr.substring(8, 10))
+  ];
+}
+
+// Helper to grab text regardless of whether it is a Dropdown (Select) or Text field in Notion
+function getPropValue(prop) {
+  if (!prop) return '';
+  if (prop.select) return prop.select.name;
+  if (prop.rich_text && prop.rich_text.length > 0) return prop.rich_text[0].plain_text;
+  return '';
+}
+
 export default async function handler(req, res) {
   try {
-    // 1. Query the Notion Database for pages that have a date
     const response = await notion.databases.query({
       database_id: databaseId,
       filter: {
-        property: 'Date', // Ensure this matches the exact name of your Date property in Notion
-        date: {
-          is_not_empty: true,
-        },
+        property: 'Date',
+        date: { is_not_empty: true },
       },
     });
 
-    // 2. Map Notion data to the ICS event format
     const events = response.results.map((page) => {
-      // Safely extract the title and date
-      const title = page.properties.Name.title[0]?.plain_text || 'Untitled Event';
-      const dateStr = page.properties.Date.date.start; 
+      // 1. Core Fields
+      const title = page.properties.Name?.title[0]?.plain_text || 'Untitled Event';
+      const dateData = page.properties.Date?.date;
       
-      // Convert standard YYYY-MM-DD into the [YYYY, MM, DD] array required by the ics library
-      const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+      const start = parseDate(dateData?.start);
+      const end = parseDate(dateData?.end);
 
-      return {
+      // 2. Extracting your bespoke Class Sessions fields
+      const location = getPropValue(page.properties.Location);
+      const course = getPropValue(page.properties.Course);
+      const instructor = getPropValue(page.properties.Instructor);
+      const sessionType = getPropValue(page.properties['Session Type']);
+      const notes = getPropValue(page.properties.Notes);
+
+      // 3. Formatting the calendar description block
+      let description = `Course: ${course}\nInstructor: ${instructor}\nType: ${sessionType}`;
+      if (notes) {
+        description += `\n\nNotes: ${notes}`;
+      }
+      description += `\n\nNotion Link: ${page.url}`;
+
+      const event = {
         title: title,
-        start: [year, month, day],
+        start: start,
+        location: location,
+        description: description,
         url: page.url,
-        // You can add more mapping here (e.g., descriptions, exact start/end times)
       };
+
+      // Attach the end time if you entered one in Notion
+      if (end) {
+        event.end = end;
+      }
+
+      return event;
     });
 
-    // 3. Generate the .ics string
     const { error, value } = createEvents(events);
+    if (error) throw error;
 
-    if (error) {
-      throw error;
-    }
-
-    // 4. Serve the .ics file dynamically
     res.setHeader('Content-Type', 'text/calendar');
     res.setHeader('Content-Disposition', 'attachment; filename="notion-feed.ics"');
     res.status(200).send(value);
     
   } catch (error) {
-    console.error('Error generating calendar:', error);
+    console.error('Error:', error);
     res.status(500).json({ error: 'Failed to generate calendar feed' });
   }
 }
