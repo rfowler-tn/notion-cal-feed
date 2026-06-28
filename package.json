@@ -1,0 +1,7 @@
+{
+  "name": "notion-cal-feed",
+  "dependencies": {
+    "@notionhq/client": "^2.2.14",
+    "ics": "^3.7.2"
+  }
+}
